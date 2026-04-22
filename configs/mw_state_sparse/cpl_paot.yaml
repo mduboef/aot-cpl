@@ -1,0 +1,59 @@
+
+alg: CPL_pAOT
+alg_kwargs:
+  alpha: 0.2
+  bc_coeff: 0.0
+  bc_data: all
+  bc_steps: 200000
+
+optim: Adam
+optim_kwargs:
+  lr: 0.0001
+
+network: ActorPolicy
+network_kwargs:
+  actor_class: ContinuousMLPActor
+  actor_kwargs:
+    dropout: 0.25
+    output_act: ["import", "torch.nn", "Tanh"]
+    hidden_layers: [512, 512]
+    ortho_init: True
+
+checkpoint: null
+
+eval_env: mw_drawer-open-v2
+
+dataset: FeedbackBuffer
+dataset_kwargs:
+  path: datasets/mw/pref/mw_drawer-open-v2_ep2500_n0.3.npz
+  batch_size: 96
+  segment_length: null
+  capacity: 10000
+  label_key: rl_sum
+  # pAOT requires comparison mode -- per-pair margins require knowing which
+  # segment in each pair is preferred vs. rejected
+  mode: comparison
+
+processor: null
+
+schedule:
+  actor: linear_warmup
+schedule_kwargs:
+  actor:
+    total_steps: 10000
+    multiplier: 0.1
+
+trainer_kwargs:
+  total_steps: 500000
+  log_freq: 500
+  profile_freq: 500
+  eval_freq: 5000
+  eval_fn: eval_policy
+  eval_kwargs:
+    num_ep: 25
+  loss_metric: reward
+  train_dataloader_kwargs:
+    num_workers: 0
+    batch_size: null
+
+seed: null
