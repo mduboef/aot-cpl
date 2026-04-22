@@ -4,7 +4,8 @@ alg_kwargs:
   alpha: 0.1
   bc_coeff: 0.0
   bc_data: all
-  bc_steps: 0   # skip bc since uAOT doesn't depend on a reference policy
+  bc_steps: 200000  # use BC to warm up policy network
+  # bc_steps: 0     # start from fresh policy network
 
 optim: Adam
 optim_kwargs:
@@ -44,16 +45,16 @@ schedule_kwargs:
     multiplier: 1.0
 
 trainer_kwargs:
-  # total_steps: 500000
-  total_steps: 20000    # minimal amount just to see loss move
+  total_steps: 500000
+  # total_steps: 20000    # minimal amount just to see loss move
   log_freq: 500
   profile_freq: 500
-  # eval_freq: 5000
-  eval_freq: 2000       # frequent eval checkpoints, about 10
+  eval_freq: 5000
+  # eval_freq: 2000       # frequent eval checkpoints, about 10
   eval_fn: eval_policy
   eval_kwargs:
-    # num_ep: 25
-    num_ep: 25          # fewer episodes per eval to speed things up
+    num_ep: 25
+    # num_ep: 5           # fewer episodes per eval to speed things up
   loss_metric: reward
   train_dataloader_kwargs:
     num_workers: 0
