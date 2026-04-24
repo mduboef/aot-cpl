@@ -2,8 +2,6 @@
 
 In this code-base we extend [*Contrastive Preference Learning: Learning From Human Feedback without RL*](https://arxiv.org/abs/2310.13639) (Hejna et al., 2023) with two new distributionally aligned preference learning objectives based on optimal transport.
 
-The original CPL paper and codebase can be found at [jhejna/cpl](https://github.com/jhejna/cpl). This repository is based on a frozen version of [research-lightning](https://github.com/jhejna/research-lightning).
-
 ---
 
 ## Overview
