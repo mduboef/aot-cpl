@@ -1,0 +1,168 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{geometry}
+
+\geometry{letterpaper, margin=1in}
+
+\begin{document}
+
+\section*{Contrastive Preference Learning (CPL)}
+
+\subsection*{Setup:}
+\begin{itemize}
+    \item MDP with a discount factor $\gamma$
+    \item Dataset of pairwise preferences between segments: $\mathcal{D}_{pref} = \{(\sigma_1^+, \sigma_1^-), (\sigma_2^+, \sigma_2^-), ..., (\sigma_n^+, \sigma_n^-)\}$
+    \item Each segment is a variable length sequence of $(s, a)$ pairs: $\sigma = (s_0, a_0, s_1, a_1, ..., s_k, a_k)$
+    \item Segments can differ in length
+\end{itemize}
+
+\subsection*{Assumption 1: Regret-based Boltzmann Rationality}
+The annotator is likely to prefer the segment with higher cumulative discounted optimal advantage
+$$P_{A^*}[\sigma^+ \succ \sigma^-] = \frac{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+)}{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+) + \exp \sum_t \gamma^t A^*(s_t^-, a_t^-)}$$
+
+\subsection*{Assumption 2: MaxEnt Objective for Annotator's Optimal Policy}
+The annotator's optimal policy is framed as the solution to an entropy-regularized RL objective
+$$\pi^* = \arg\max_\pi \mathbb{E} \left[ \sum_{t=0}^\infty \gamma^t (r(s_t, a_t) - \alpha \log \pi(a_t|s_t)) \right]$$
+$\alpha$ here is the temperature parameter that determines how strong entropy effect is.\\
+This assumption induces a bijection between $A^*$ and $\pi^*$:
+$$A^*(s, a) \equiv \alpha \log \pi^*(a|s)$$
+
+\subsection*{Step 1: Substitute $\pi^*$ into the Preference Model using Bijection (A2)}
+Using the bijection induced from Assumption 2, substitute $A^*(s, a)$ for $\alpha \log \pi^*(a|s)$ in preference/regret-based Boltzmann rationality formula:
+$$P[\sigma^+ \succ \sigma^-] = \frac{\exp \text{score}_{\pi^*}(\sigma^+)}{\exp \text{score}_{\pi^*}(\sigma^+) + \exp \text{score}_{\pi^*}(\sigma^-)} \quad \text{where } \text{score}_\pi(\sigma) = \sum_t \gamma^t \alpha \log \pi(a_t|s_t)$$
+
+\subsection*{Step 2: Parameterize our Policy as a Neural Network}
+Represent the policy we are tuning $\pi_\theta$ as a neural net.\\
+Takes in a state, returns a distribution over actions.
+
+\subsection*{Step 3: Train Policy Network}
+Train $\pi_\theta$ to minimize the negative log of the softmax ratio.
+The softmax ratio here is the score for the preferred segment (under $\pi_\theta$) over the sum of scores for both the preferred and rejected segment.
+
+$$\mathcal{L}(\theta) = \mathbb{E}_{(\sigma^+, \sigma^-) \sim \mathcal{D}_{pref}} \left[ -\log \frac{\exp \sum_{\sigma^+} \gamma^t \alpha \log \pi_\theta(a_t^+|s_t^+)}{\exp \sum_{\sigma^+} \gamma^t \alpha \log \pi_\theta(a_t^+|s_t^+) + \exp \sum_{\sigma^-} \gamma^t \alpha \log \pi_\theta(a_t^-|s_t^-)} \right]$$
+
+\newpage
+
+% \section*{Unpaired Alignment via Optimal Transport (uAOT) Algorithm}
+
+% \newpage
+
+% \section*{Paired Alignment via Optimal Transport (pAOT) Algorithm}
+
+% \newpage
+
+\section*{CPL with uAOT and No Reference Policy}
+
+\subsection*{Setup:}
+\begin{itemize}
+    \item MDP $(S,A,p,\gamma)$ without rewards
+    \item Dataset of pairwise preferences between segments: $\mathcal{D}_{pref} = \{(\sigma_1^+, \sigma_1^-), (\sigma_2^+, \sigma_2^-), ..., (\sigma_n^+, \sigma_n^-)\}$
+    \item Each segment is a variable length sequence of $(s, a)$ pairs: $\sigma = (s_0, a_0, s_1, a_1, ..., s_k, a_k)$
+
+\end{itemize}
+
+\subsection*{Assumption 1: Regret-based Boltzmann Rationality}
+The annotator is likely to prefer the segment with higher cumulative discounted optimal advantage
+$$P_{A^*}[\sigma^+ \succ \sigma^-] = \frac{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+)}{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+) + \exp \sum_t \gamma^t A^*(s_t^-, a_t^-)}$$
+
+\subsection*{Assumption 2: MaxEnt Objective for Annotator's Optimal Policy}
+The annotator's optimal policy is framed as the solution to an entropy-regularized RL objective
+$$\pi^* = \arg\max_\pi \mathbb{E} \left[ \sum_{t=0}^\infty \gamma^t (r(s_t, a_t) - \alpha \log \pi(a_t|s_t)) \right]$$
+$\alpha$ here is the temperature parameter that determines how strong entropy effect is.\\
+
+\subsection*{Step 1: Substitute $\pi^*$ into the Preference Model using Bijection}
+Using the bijection induced from Assumption 2, substitute $A^*(s, a)$ for $\alpha \log \pi^*(a|s)$ in preference/regret-based Boltzmann rationality formula:
+$$P[\sigma^+ \succ \sigma^-] = \frac{\exp \text{score}_{\pi^*}(\sigma^+)}{\exp \text{score}_{\pi^*}(\sigma^+) + \exp \text{score}_{\pi^*}(\sigma^-)} \quad \text{where } \text{score}_\pi(\sigma) = \sum_t \gamma^t \alpha \log \pi(a_t|s_t)$$
+
+\subsection*{Step 2: Parameterize our Policy as a Neural Network}
+Represent the policy we are tuning $\pi_\theta$ as a neural net. The policy network takes in a state and returns a distribution over the set of actions.
+
+\subsection*{Step 3: Compute Score For All Segments Under the Current Policy}
+This is the same score used in CPL. The score for a segment is the discounted entropy-regularized sum of log probabilities of each observed action under $\pi_\theta$. We compute these probabilities, $\pi_\theta(a_t|s_t)$, by feeding the observed state, $s_t$, through the policy network and observing the probability the policy network gives the action that was actually taken, $a_t$.\\
+We define the score for the positive segment of preference pair $i$ under policy $\pi_\theta$ as:
+$$u_\theta^i=\sum_{t}\gamma^t \alpha \log \pi_\theta(a_t^{(i,+)}|s_t^{(i,+)})$$
+The score for the rejected segment of preference pair $i$ under policy $\pi_\theta$:\\
+$$v_\theta^i=\sum_{t}\gamma^t \alpha \log \pi_\theta(a_t^{(i,-)}|s_t^{(i,-)})$$
+
+\subsection*{Step 4: Split the Preference Pairs into Two Sets}
+Separate each preference pair in $\mathcal{D}_{pref}$. Place the scores for all preferred segments into a single set $\{u_\theta^i\}$. Place the scores for all rejected segments into a separate set $\{v_\theta^i\}$.
+
+\subsection*{Step 5: Sort Scores for Preferred and Rejected Segments Independently}
+Sort the set of scores for preferred segments $\{u_\theta^i\}$ and set of scores for rejected segments $\{v_\theta^i\}$ independently from lowest to highest.
+
+$$u_\theta^{(1)} \leq u_\theta^{(2)} \leq ...\leq u_\theta^{(n)}$$
+$$v_\theta^{(1)} \leq v_\theta^{(2)} \leq ...\leq v_\theta^{(n)}$$
+
+The $i$-th lowest preferred score is matched with the $i$-th lowest rejected score. This is the one-dimensional optimal transport coupling via the northwest corner method.
+
+\subsection*{Step 6: Calculate CPL Loss with Respect to Order-matched Pairs}
+$$\mathcal{L}(\theta)=\frac{1}{n}\sum_{i=1}^{n}-\log \frac{\text{exp}(u_\theta^{(i)})}{\text{exp}(u_\theta^{(i)})+\text{exp}(v_\theta^{(i)})}$$
+
+\subsection*{Step 7: Backpropagate Loss Through Policy Network}
+Backpropagate through $\mathcal{L}$ to update $\pi_\theta$. The gradient flows through both the sorted scores and the CPL loss. Repeat from step 3 until policy convergence.\\ \\ \\ \textbf{Note:} This approach could be implemented with a reference policy $\pi_{ref}$. It would require a redefinition of the scores in step 3 as:
+$$u_\theta^i = \sum_{t}\gamma^t \alpha \big(\log \pi_\theta(a_t^{(i,+)}|s_t^{(i,+)}) - \log \pi_{ref}(a_t^{(i,+)}|s_t^{(i,+)})\big)$$
+$$v_\theta^i = \sum_{t}\gamma^t \alpha \big(\log \pi_\theta(a_t^{(i,-)}|s_t^{(i,-)}) - \log \pi_{ref}(a_t^{(i,-)}|s_t^{(i,-)})\big)$$
+The other steps would remain unchanged.
+\newpage
+
+
+
+
+
+
+
+\section*{CPL with pAOT}
+
+\subsection*{Setup:}
+\begin{itemize}
+    \item MDP $(S,A,p,\gamma)$ without a specified reward function
+    \item Dataset of pairwise preferences between segments: $\mathcal{D}_{pref} = \{(\sigma_1^+, \sigma_1^-), (\sigma_2^+, \sigma_2^-), ..., (\sigma_n^+, \sigma_n^-)\}$
+    \item Each segment is a variable length sequence of $(s, a)$ pairs: $\sigma = (s_0, a_0, s_1, a_1, ..., s_k, a_k)$
+    \item Reference policy $\pi_{ref}$, could be obtained in various ways (ie. behavior cloning)
+\end{itemize}
+
+\subsection*{Assumption 1: Regret-based Boltzmann Rationality}
+The annotator is likely to prefer the segment with higher cumulative discounted optimal advantage
+$$P_{A^*}[\sigma^+ \succ \sigma^-] = \frac{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+)}{\exp \sum_t \gamma^t A^*(s_t^+, a_t^+) + \exp \sum_t \gamma^t A^*(s_t^-, a_t^-)}$$
+
+\subsection*{Assumption 2: MaxEnt Objective for Annotator's Optimal Policy}
+The annotator's optimal policy is framed as the solution to an entropy-regularized RL objective
+$$\pi^* = \arg\max_\pi \mathbb{E} \left[ \sum_{t=0}^\infty \gamma^t (r(s_t, a_t) - \alpha \log \pi(a_t|s_t)) \right]$$
+$\alpha$ here is the temperature parameter that determines how strong entropy effect is.\\
+
+\subsection*{Step 1: Substitute $\pi^*$ into the Preference Model using Bijection}
+Using the bijection induced from Assumption 2, substitute $A^*(s, a)$ for $\alpha \log \pi^*(a|s)$ in preference/regret-based Boltzmann rationality formula:
+$$P[\sigma^+ \succ \sigma^-] = \frac{\exp \text{score}_{\pi^*}(\sigma^+)}{\exp \text{score}_{\pi^*}(\sigma^+) + \exp \text{score}_{\pi^*}(\sigma^-)} \quad \text{where } \text{score}_\pi(\sigma) = \sum_t \gamma^t \alpha \log \pi(a_t|s_t)$$
+
+\subsection*{Step 2: Parameterize our Policy as a Neural Network}
+Represent the policy we are tuning $\pi_\theta$ as a neural net.\\
+Takes in a state, returns a distribution over actions.
+
+\subsection*{Step 3: Obtain Reference Policy}
+Establish a reference policy $\pi_{ref}$. This can be done in various ways. Here we generate a reference policy by performing behavior cloning on all segments contained in our preference dataset, $\mathcal{D}_{pref}$.
+
+\subsection*{Step 4: Compute Per-Pair Margins Under Both Policies}
+For every preference pair $(\sigma^+,\sigma^-)\in\mathcal{D}_{pref}$, compute the margin between the preferred and rejected segment's scores. We define the score for a single segment $\sigma$ under policy $\pi$ as:
+$$\text{score}(\sigma;\,\pi)=\sum_{t} \gamma^t \alpha \log \pi(a_t \mid s_t)$$
+The margin under the current policy $\pi_{\theta}$ for pair $i$:
+$$u_\theta^i = \text{score}(\sigma_i^+;\,\pi_\theta) - \text{score}(\sigma_i^-;\,\pi_\theta)$$
+The margin under the reference policy $\pi_{ref}$ for pair $i$:
+$$v_{ref}^i = \text{score}(\sigma_i^+;\,\pi_{ref}) - \text{score}(\sigma_i^-;\,\pi_{ref})$$
+
+\subsection*{Step 5: Sort Margins}
+Sort the set of policy margins $\{u_\theta^i\}$ and set of reference margins $\{v_{ref}^i\}$ independently from lowest to highest.
+$$u_\theta^{(1)} \leq u_\theta^{(2)} \leq \ldots \leq u_\theta^{(n)}$$
+$$v_{ref}^{(1)} \leq v_{ref}^{(2)} \leq \ldots \leq v_{ref}^{(n)}$$
+The $i$-th lowest policy margin is matched with the $i$-th lowest reference margin. This is the one-dimensional optimal transport coupling via the northwest corner method.
+
+\subsection*{Step 6: Calculate CPL Loss with Respect to Order-matched Pairs}
+$$\mathcal{L}(\theta)=\frac{1}{n}\sum_{i=1}^{n}-\log \frac{\text{exp}(u_\theta^{(i)})}{\text{exp}(u_\theta^{(i)})+\text{exp}(v_{ref}^{(i)})}$$
+
+\subsection*{Step 7: Backpropagate Loss Through Policy Network}
+Backpropagate through $\mathcal{L}(\theta)$ to update $\pi_\theta$. The gradient flows through both the sorted scores and the CPL loss. Repeat from step 4 until policy convergence.
+
+
+
+\end{document}
