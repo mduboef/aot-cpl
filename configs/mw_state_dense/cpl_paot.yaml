@@ -8,7 +8,7 @@ alg_kwargs:
   ref_bc_steps: 200000
   # theta_bc_steps: how long to BC-warm π_θ after π_ref is frozen (phase 2).
   # set to 0 to start pAOT from a completely fresh π_θ (true to the formalization).
-  theta_bc_steps: 0
+  theta_bc_steps: 200000
 
 optim: Adam
 optim_kwargs:
@@ -45,10 +45,10 @@ schedule:
 schedule_kwargs:
   actor:
     total_steps: 10000
-    multiplier: 0.1
+    multiplier: 1.0
 
 trainer_kwargs:
-  total_steps: 500000
+  total_steps: 700000
   log_freq: 500
   profile_freq: 500
   eval_freq: 5000
