@@ -4,24 +4,48 @@
 # CPL with Unpaired Alignment via Optimal Transport (uAOT).
 # Implements the algorithm described in aot_cpl.tex, section:
 #   "CPL with uAOT and No Reference Policy"
+# Extended to use a reference policy for log-ratio scoring.
+#
+# Training has three sequential phases:
+#
+#   Phase 1 -- Reference BC (steps 0 to ref_bc_steps)
+#     π_ref (reference_network) is trained with behavior cloning.
+#     π_θ (network) is completely untouched -- it stays at random init.
+#     Produces the reference policy used to normalize segment scores.
+#
+#   Phase 2 -- Optional policy warmup (steps ref_bc_steps to ref_bc_steps + bc_steps)
+#     π_ref is frozen (weights locked after phase 1).
+#     π_θ is optionally warmed up with behavior cloning.
+#     Set bc_steps=0 to skip this phase and start uAOT from a fresh π_θ.
+#
+#   Phase 3 -- uAOT contrastive training (steps ref_bc_steps + bc_steps onwards)
+#     π_θ is trained with the uAOT loss using frozen π_ref for log-ratio scores.
 #
 # Key difference from baseline CPL (cpl.py):
 #   Standard CPL compares each (σ+, σ-) pair directly.
-#   uAOT instead separates all preferred and rejected segments across the batch,
+#   uAOT separates all preferred and rejected segments across the batch,
 #   sorts each group independently by score, then matches the i-th ranked
 #   preferred segment with the i-th ranked rejected segment (1-D optimal
 #   transport via the northwest corner method). The CPL loss is then applied
 #   to these OT-matched pairs rather than the original preference pairs.
 #
-# This allows the model to learn from cross-pair comparisons: a highly-ranked
-# preferred segment is compared against a highly-ranked rejected one, which
-# may provide a stronger training signal than within-pair comparisons alone.
+# Key difference from pAOT (cpl_paot.py):
+#   pAOT operates on per-pair MARGINS (preferred_score - rejected_score) and
+#   sorts those margins, training π_θ margins to exceed π_ref margins.
+#   uAOT operates on individual segment scores -- preferred and rejected sets
+#   are sorted independently to achieve stochastic dominance of the preferred
+#   score distribution over the rejected score distribution.
 #
-# Data mode requirement:
-#   FeedbackBuffer must use mode="comparison" so that each batch contains
-#   (obs_1, action_1, obs_2, action_2, label). The label indicates which
-#   segment is preferred (label=1 → obs_2 is preferred, label=0 → obs_1).
-#   This is different from baseline CPL configs which use mode="rank".
+# Why log-ratio scores are required:
+#   Absolute log-prob scores (α log π_θ(a|s)) are not comparable across
+#   preference pairs -- they reflect both trajectory quality AND ease of
+#   imitation. After BC warmup, some rejected segments (simple, predictable
+#   actions) can outscore preferred segments (complex, specific movements),
+#   causing OT to create semantically inverted cross-pair comparisons.
+#   Log-ratio scores α(log π_θ - log π_ref) normalize out ease-of-imitation:
+#   all scores start near 0 and shift only as π_θ improves beyond π_ref,
+#   making cross-pair comparisons meaningful.
+#   See formalization note at the end of the uAOT section in aot_cpl.tex.
 #
 # Discount factor note:
 #   The formalization defines score_π(σ) = Σ_t γ^t α log π(a_t|s_t).
@@ -30,23 +54,28 @@
 #   "discount" key in the batch but it is intentionally not used.
 
 import itertools
-from typing import Any, Dict
+from typing import Any, Dict, Type
 
 import torch
 
 from research.utils import utils
 
 from .off_policy_algorithm import OffPolicyAlgorithm
+from .reference_policy import (
+	build_reference_network,
+	compute_reference_log_probs,
+	freeze_reference,
+)
 
 
 # uaot_loss
 # Formalization reference: Steps 5 and 6 of "CPL with uAOT and No Reference Policy"
 #
 # Inputs:
-#   u  -- preferred segment scores for the batch, shape (n,)
-#          u_θ^i = Σ_t α log π_θ(a_t^{i,+} | s_t^{i,+})  (tex eq. after Step 3)
-#   v  -- rejected segment scores for the batch, shape (n,)
-#          v_θ^i = Σ_t α log π_θ(a_t^{i,-} | s_t^{i,-})  (tex eq. after Step 3)
+#   u  -- preferred segment log-ratio scores for the batch, shape (n,)
+#          u_θ^i = Σ_t α (log π_θ(a_t^{i,+} | s_t^{i,+}) - log π_ref(...))
+#   v  -- rejected segment log-ratio scores for the batch, shape (n,)
+#          v_θ^i = Σ_t α (log π_θ(a_t^{i,-} | s_t^{i,-}) - log π_ref(...))
 #
 # Step 5 (tex): Sort u and v independently from lowest to highest.
 #   u_θ^(1) ≤ u_θ^(2) ≤ ... ≤ u_θ^(n)
@@ -85,26 +114,51 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		alpha: float = 1.0,
 		bc_coeff: float = 0.0,
 		bc_data: str = "all",
-		bc_steps: int = 0,
+		ref_bc_steps: int = 200000,  # phase 1: how long to BC-train π_ref
+		bc_steps: int = 0,           # phase 2: how long to BC-warm π_θ (0 = skip)
 		**kwargs,
 	) -> None:
 		super().__init__(*args, **kwargs)
 		assert "encoder" in self.network.CONTAINERS
 		assert "actor" in self.network.CONTAINERS
+		assert ref_bc_steps > 0, "ref_bc_steps must be > 0 to BC-train the reference policy"
 		self.alpha = alpha
 		self.bc_data = bc_data
 		self.bc_steps = bc_steps
 		self.bc_coeff = bc_coeff
-		# note: no contrastive_bias here -- the uAOT loss is unbiased BCE
-		# (the tex formalization does not include the bias term from base CPL)
+		self.ref_bc_steps = ref_bc_steps
+		# the step at which uAOT contrastive training begins
+		self._uaot_start = ref_bc_steps + bc_steps
+
+	def setup_network(self, network_class: Type[torch.nn.Module], network_kwargs: Dict) -> None:
+		# π_θ: fresh policy network, trained contrastively in phase 3
+		# initialized randomly and never touched during phase 1 (reference BC)
+		self.network = network_class(
+			self.processor.observation_space, self.processor.action_space, **network_kwargs
+		).to(self.device)
+
+		# π_ref: reference policy network, BC-trained in phase 1
+		# gradients are enabled here so phase 1 can train it directly
+		# freeze_reference() is called at the end of phase 1 to lock the weights
+		self.reference_network = build_reference_network(
+			self.processor.observation_space,
+			self.processor.action_space,
+			network_kwargs,
+			self.device,
+		)
 
 	def setup_optimizers(self) -> None:
-		params = itertools.chain(self.network.actor.parameters(), self.network.encoder.parameters())
+		# start with optimizer over π_ref for phase 1 BC training
+		# this will be replaced at the end of phase 1 with an optimizer over π_θ
+		params = itertools.chain(
+			self.reference_network.actor.parameters(),
+			self.reference_network.encoder.parameters()
+		)
 		groups = utils.create_optim_groups(params, self.optim_kwargs)
 		self.optim["actor"] = self.optim_class(groups)
 
 	def setup_schedulers(self, do_nothing=True):
-		# mirror CPL: suppress LR schedule during BC pretraining, activate after
+		# suppress LR schedule during BC phases, activate when uAOT begins
 		if do_nothing:
 			for k in self.schedulers_class.keys():
 				if k in self.optim:
@@ -114,6 +168,26 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		else:
 			self.schedulers = {}
 			super().setup_schedulers()
+
+	def _get_bc_loss(self, batch, network):
+		# compute BC loss (negative log-likelihood) on a given network
+		obs = torch.cat((batch["obs_1"], batch["obs_2"]), dim=0)
+		action = torch.cat((batch["action_1"], batch["action_2"]), dim=0)
+
+		dist = network.actor(network.encoder(obs))
+		if isinstance(dist, torch.distributions.Distribution):
+			lp = dist.log_prob(action)
+		else:
+			assert dist.shape == action.shape
+			lp = -torch.square(dist - action).sum(dim=-1)
+
+		if self.bc_data == "pos":
+			lp1, lp2 = torch.chunk(lp, 2, dim=0)
+			label = batch["label"]
+			lp_pos = torch.cat((lp1[label <= 0.5], lp2[label >= 0.5]), dim=0)
+			return (-lp_pos).mean()
+		else:
+			return (-lp).mean()
 
 	def _get_cpl_loss(self, batch):
 		# requires "comparison" mode data: obs_1, action_1, obs_2, action_2, label
@@ -127,37 +201,30 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		obs = torch.cat((batch["obs_1"], batch["obs_2"]), dim=0)
 		action = torch.cat((batch["action_1"], batch["action_2"]), dim=0)
 
-		# formalization step 3: compute log π_θ(a_t | s_t) for every timestep
-		# obs is encoded first, then passed through actor to get a distribution
+		# compute log π_θ(a_t | s_t) for every timestep
 		obs_encoded = self.network.encoder(obs)
 		dist = self.network.actor(obs_encoded)
 
 		if isinstance(dist, torch.distributions.Distribution):
-			# stochastic policy: true NLL
 			lp = dist.log_prob(action)  # shape (2*B, S)
 		else:
 			# deterministic policy approximation (matches base CPL convention)
 			assert dist.shape == action.shape
 			lp = -torch.square(dist - action).sum(dim=-1)  # shape (2*B, S)
 
-		# BC auxiliary loss (same structure as base CPL)
-		# keeps policy close to behavior data during and after pretraining
-		if self.bc_data == "pos":
-			lp1, lp2 = torch.chunk(lp, 2, dim=0)
-			label = batch["label"]
-			lp_pos = torch.cat(
-				(lp1[label <= 0.5], lp2[label >= 0.5]), dim=0
-			)
-			bc_loss = (-lp_pos).mean()
-		else:
-			bc_loss = (-lp).mean()
+		bc_loss = self._get_bc_loss(batch, self.network)
 
-		# formalization step 3: compute segment scores for each segment
-		#   u_θ^i = Σ_t α log π_θ(a_t^{i,+} | s_t^{i,+})
-		#   v_θ^i = Σ_t α log π_θ(a_t^{i,-} | s_t^{i,-})
+		# compute log π_ref(a_t | s_t) with no gradients (π_ref is frozen)
+		with torch.no_grad():
+			ref_lp = compute_reference_log_probs(self.reference_network, obs, action)
+			# ref_lp shape: (2*B, S)
+
+		# formalization note (uAOT section): log-ratio scores normalize out ease-of-imitation
+		#   u_θ^i = Σ_t α (log π_θ(a_t^{i,+}|s_t^{i,+}) - log π_ref(a_t^{i,+}|s_t^{i,+}))
+		#   v_θ^i = Σ_t α (log π_θ(a_t^{i,-}|s_t^{i,-}) - log π_ref(a_t^{i,-}|s_t^{i,-}))
 		# note: γ^t discounting is omitted (γ=1 convention, matches base CPL)
-		adv = self.alpha * lp  # shape (2*B, S)
-		segment_adv = adv.sum(dim=-1)  # shape (2*B,) -- sum over timesteps
+		adv = self.alpha * (lp - ref_lp)  # shape (2*B, S)
+		segment_adv = adv.sum(dim=-1)     # shape (2*B,) -- sum over timesteps
 
 		# split back into per-segment scores for the two sides of each pair
 		adv1, adv2 = torch.chunk(segment_adv, 2, dim=0)  # each (B,)
@@ -173,7 +240,6 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		v = torch.where(pref_mask, adv1, adv2)
 
 		# drop tied pairs (label=0.5) -- OT matching requires a clear preference
-		# ties would introduce random preferred/rejected assignments
 		not_tied = label != 0.5
 		u = u[not_tied]
 		v = v[not_tied]
@@ -184,38 +250,65 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		return cpl_loss, bc_loss, accuracy
 
 	def train_step(self, batch: Dict, step: int, total_steps: int) -> Dict:
-		cpl_loss, bc_loss, accuracy = self._get_cpl_loss(batch)
+		# -- phase 1: BC training of π_ref --
+		# π_θ is completely untouched during this phase
+		if step < self.ref_bc_steps:
+			bc_loss = self._get_bc_loss(batch, self.reference_network)
+			self.optim["actor"].zero_grad()
+			bc_loss.backward()
+			self.optim["actor"].step()
 
-		# formalization step 7: backpropagate
-		# phase 1 (step < bc_steps): pure BC pretraining
-		# phase 2 (step >= bc_steps): uAOT-CPL loss + optional BC regularization
-		if step < self.bc_steps:
-			loss = bc_loss
-			cpl_loss, accuracy = torch.tensor(0.0), torch.tensor(0.0)
+			# end of phase 1: freeze π_ref, switch optimizer to π_θ
+			if step == self.ref_bc_steps - 1:
+				freeze_reference(self.reference_network)
+				del self.optim["actor"]
+				params = itertools.chain(
+					self.network.actor.parameters(),
+					self.network.encoder.parameters()
+				)
+				groups = utils.create_optim_groups(params, self.optim_kwargs)
+				self.optim["actor"] = self.optim_class(groups)
+				# activate LR schedule now if there is no theta BC warmup phase
+				if self.bc_steps == 0:
+					self.setup_schedulers(do_nothing=False)
+
+			return dict(cpl_loss=0.0, bc_loss=bc_loss.item(), accuracy=0.0)
+
+		# -- phase 2: optional BC warmup of π_θ --
+		# π_ref is frozen, π_θ trained with BC before contrastive loss kicks in
+		elif step < self._uaot_start:
+			bc_loss = self._get_bc_loss(batch, self.network)
+			self.optim["actor"].zero_grad()
+			bc_loss.backward()
+			self.optim["actor"].step()
+
+			# end of phase 2: reset optimizer and activate LR schedule for uAOT
+			if step == self._uaot_start - 1:
+				del self.optim["actor"]
+				params = itertools.chain(
+					self.network.actor.parameters(),
+					self.network.encoder.parameters()
+				)
+				groups = utils.create_optim_groups(params, self.optim_kwargs)
+				self.optim["actor"] = self.optim_class(groups)
+				self.setup_schedulers(do_nothing=False)
+
+			return dict(cpl_loss=0.0, bc_loss=bc_loss.item(), accuracy=0.0)
+
+		# -- phase 3: uAOT contrastive training of π_θ --
+		# π_ref is frozen throughout, π_θ is trained with log-ratio uAOT loss
 		else:
+			cpl_loss, bc_loss, accuracy = self._get_cpl_loss(batch)
 			loss = cpl_loss + self.bc_coeff * bc_loss
+			self.optim["actor"].zero_grad()
+			loss.backward()
+			self.optim["actor"].step()
 
-		self.optim["actor"].zero_grad()
-		loss.backward()
-		self.optim["actor"].step()
-
-		# at the BC→CPL transition: reset optimizer and activate LR schedule
-		# (mirrors base CPL to ensure a clean start for the CPL phase)
-		if step == self.bc_steps - 1:
-			del self.optim["actor"]
-			params = itertools.chain(
-				self.network.actor.parameters(),
-				self.network.encoder.parameters()
+			return dict(
+				cpl_loss=cpl_loss.item(),
+				bc_loss=bc_loss.item(),
+				accuracy=accuracy.item()
 			)
-			groups = utils.create_optim_groups(params, self.optim_kwargs)
-			self.optim["actor"] = self.optim_class(groups)
-			self.setup_schedulers(do_nothing=False)
-
-		return dict(
-			cpl_loss=cpl_loss.item(),
-			bc_loss=bc_loss.item(),
-			accuracy=accuracy.item()
-		)
 
 	def validation_step(self, batch: Any) -> Dict:
 		with torch.no_grad():

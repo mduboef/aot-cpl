@@ -4,6 +4,9 @@ alg_kwargs:
   alpha: 0.1
   bc_coeff: 0.0
   bc_data: all
+  # ref_bc_steps: how long to BC-train π_ref (phase 1). π_θ is untouched.
+  ref_bc_steps: 200000
+  # bc_steps: how long to BC-warm π_θ after π_ref is frozen (phase 2).
   bc_steps: 200000  # use BC to warm up policy network
   # bc_steps: 0     # start from fresh policy network
 
@@ -45,7 +48,7 @@ schedule_kwargs:
     multiplier: 1.0
 
 trainer_kwargs:
-  total_steps: 500000
+  total_steps: 700000
   # total_steps: 20000    # minimal amount just to see loss move
   log_freq: 500
   profile_freq: 500
