@@ -6,6 +6,7 @@ alg_kwargs:
   bc_data: all
   bc_steps: 200000  # use BC to warm up policy network
   # bc_steps: 0     # start from fresh policy network
+  use_ot: false     # diagnostic: false = standard CPL pairing, true = OT-sorted pairing
 
 optim: Adam
 optim_kwargs:

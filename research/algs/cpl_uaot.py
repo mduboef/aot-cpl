@@ -57,10 +57,15 @@ from .off_policy_algorithm import OffPolicyAlgorithm
 #   L(θ) = (1/n) Σ_i -log [ exp(u_θ^(i)) / (exp(u_θ^(i)) + exp(v_θ^(i))) ]
 #
 # Implementation uses the numerically stable log-sum-exp trick to avoid overflow.
-def uaot_loss(u, v):
-	# step 5: sort preferred and rejected scores independently
-	u_sorted = torch.sort(u).values  # u_θ^(1) ≤ ... ≤ u_θ^(n)
-	v_sorted = torch.sort(v).values  # v_θ^(1) ≤ ... ≤ v_θ^(n)
+def uaot_loss(u, v, use_ot=True):
+	if use_ot:
+		# step 5: sort preferred and rejected scores independently
+		u_sorted = torch.sort(u).values  # u_θ^(1) ≤ ... ≤ u_θ^(n)
+		v_sorted = torch.sort(v).values  # v_θ^(1) ≤ ... ≤ v_θ^(n)
+	else:
+		# diagnostic: skip OT sorting, use original pairs directly (equiv. to standard CPL)
+		u_sorted = u
+		v_sorted = v
 
 	# step 6: compute loss on OT-matched pairs
 	# logit = u_sorted - v_sorted (the log-odds favoring the preferred segment)
@@ -86,6 +91,7 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		bc_coeff: float = 0.0,
 		bc_data: str = "all",
 		bc_steps: int = 0,
+		use_ot: bool = True,
 		**kwargs,
 	) -> None:
 		super().__init__(*args, **kwargs)
@@ -95,6 +101,7 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		self.bc_data = bc_data
 		self.bc_steps = bc_steps
 		self.bc_coeff = bc_coeff
+		self.use_ot = use_ot
 		# note: no contrastive_bias here -- the uAOT loss is unbiased BCE
 		# (the tex formalization does not include the bias term from base CPL)
 
@@ -179,7 +186,7 @@ class CPL_uAOT(OffPolicyAlgorithm):
 		v = v[not_tied]
 
 		# formalization steps 5 and 6: OT sort + CPL loss (see uaot_loss above)
-		cpl_loss, accuracy = uaot_loss(u, v)
+		cpl_loss, accuracy = uaot_loss(u, v, use_ot=self.use_ot)
 
 		return cpl_loss, bc_loss, accuracy
 
